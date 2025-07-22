@@ -7,9 +7,11 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from discord import app_commands
 
+
 load_dotenv()
 
 token = os.getenv('DISCORD_TOKEN')
+
 
 async def search_youtube(query,ydl_options):
     loop = asyncio.get_running_loop()
@@ -28,15 +30,15 @@ intents.reactions = True
 
 bot = commands.Bot(command_prefix='!', intents=intents) 
 
-Guild_ID = 760782863963521034
+GUILD_ID = 760782863963521034
 
 
 @bot.event
 async def on_ready():
-    test_guild = discord.Object(id=Guild_ID)
-    await bot.tree.sync()
-    print(f"Slash commands synchronized! Commands: {bot.tree.get_commands()}")
-
+    test_guild = discord.Object(id=GUILD_ID)
+    await bot.tree.sync(guild=test_guild)  # <- sync only to this guild
+    
+    print(f"Slash commands synced to guild {GUILD_ID}!")
     print("Bot is ready!")
 
 @bot.event
@@ -69,8 +71,9 @@ async def test(ctx, arg):
     await ctx.send(arg)
 
 
-@bot.tree.command(name="play", description="Play a song or add it to the queue.")
+@bot.tree.command(name="play", description="add it to the queue.")
 @app_commands.describe(song="The song to play or add to the queue.")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
 async def play(interaction: discord.Interaction, song: str):
     await interaction.response.defer()
 
@@ -101,24 +104,14 @@ async def play(interaction: discord.Interaction, song: str):
         return
 
     first_track = tracks[0]
+    audio_url = first_track["url"]
     title = first_track.get("title", "Untitled")
 
-    # Select audio-only stream
-    formats = first_track.get("formats", [])
-    audio_url = None
-    for f in formats:
-        if f.get("acodec") != "none" and f.get("vcodec") == "none":
-            audio_url = f.get("url")
-            break
-
-    if not audio_url:
-        await interaction.followup.send("Could not find a valid audio stream.")
-        return
 
     # Log the audio URL for debugging
     print(f"🔊 Playing URL: {audio_url}")
     ffmpeg_options = {
-        "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin",
+        "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
         "options": "-vn",
     }
 
@@ -143,14 +136,40 @@ async def play(interaction: discord.Interaction, song: str):
     except Exception as e:
         await interaction.followup.send(f"Playback error: {str(e)}")
 
-    # Delay disconnect slightly to avoid race condition
-    await asyncio.sleep(0.5)
-    # Only disconnect after playback completes
-    if voice_client.is_connected():
+    # # Delay disconnect slightly to avoid race condition
+    # await asyncio.sleep(0.5)
+    # # Only disconnect after playback completes
+    # if voice_client.is_connected():
+    #     await voice_client.disconnect()
+
+@bot.tree.command(name="leave", description="Disconnect the bot from the voice channel.")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def leave(interaction: discord.Interaction):
+    voice_client = interaction.guild.voice_client
+    if voice_client and voice_client.is_connected():
         await voice_client.disconnect()
+        await interaction.response.send_message("Disconnected.")
+    else:
+        await interaction.response.send_message("I'm not connected to any voice channel.")
 
+@bot.tree.command(name="join", description="Make the bot join your voice channel.")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def join(interaction: discord.Interaction):
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        await interaction.response.send_message("You are not connected to a voice channel.")
+        return
 
+    voice_channel = interaction.user.voice.channel
+    voice_client = interaction.guild.voice_client
 
+    if voice_client is None:
+        voice_client = await voice_channel.connect()
+        await interaction.response.send_message(f"Joined {voice_channel.name}.")
+    elif voice_channel != voice_client.channel:
+        await voice_client.move_to(voice_channel)
+        await interaction.response.send_message(f"Moved to {voice_channel.name}.")
+    else:
+        await interaction.response.send_message("I'm already in that channel.")
 
 attendees = {}
 @bot.command()
@@ -206,6 +225,7 @@ async def attendance(ctx, message_id: int):
     else:
         names = "\n".join(attending_members)
         await ctx.send(f"Attendees: \n{names}")
+
 
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
 
