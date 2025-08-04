@@ -30,7 +30,6 @@ intents.reactions = True
 
 bot = commands.Bot(command_prefix='!', intents=intents) 
 
-GUILD_ID = 760782863963521034
 
 
 @bot.event
