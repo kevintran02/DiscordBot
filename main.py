@@ -58,17 +58,28 @@ async def on_message(message):
     if message.author == bot.user:
         return
     
-    if "sup" in message.content.lower():
-        await message.channel.send(f"stfu {message.author.name}")
-    await bot.process_commands(message)
 
     if "bhris" in message.content.lower():
         await message.channel.send("I'm toired")
+    
+    await bot.process_commands(message)
     
 
 @bot.command()
 async def ping(ctx):
     await ctx.send('Pong!')
+
+@bot.command()
+async def instagram(ctx):
+    """Sends the team Instagram link."""
+    url = "https://www.instagram.com/beavsknowbjj"
+    embed = discord.Embed(
+        title="📸 Beavs Know BJJ Instagram",
+        url=url,
+        description="Follow us on Instagram!",
+        color=discord.Color.orange()
+    )
+    await ctx.send(embed=embed)
 
 @bot.command()
 async def hello(ctx):
@@ -79,6 +90,7 @@ async def test(ctx, arg):
     await ctx.send(arg)
 
 # Music commands
+NOW_PLAYING = {}
 
 
 def play_next(interaction, voice_client):
@@ -91,7 +103,6 @@ def play_next(interaction, voice_client):
             "options": "-vn"
         }
 
-        # Use Opus for better quality + less static
         source = discord.FFmpegOpusAudio(
             url,
             **ffmpeg_options,
@@ -101,10 +112,23 @@ def play_next(interaction, voice_client):
         def after_playing(error):
             if error:
                 print(f"Playback error: {error}")
-            # Play the next song
             play_next(interaction, voice_client)
 
         voice_client.play(source, after=after_playing)
+
+        # ✅ Update Now Playing message
+        async def update_message():
+            view = MusicControls(voice_client, guild_id)
+            if guild_id in NOW_PLAYING:
+                try:
+                    await NOW_PLAYING[guild_id].edit(content=f"🎶 Now playing: **{title}**", view=view)
+                except Exception:
+                    pass
+            else:
+                msg = await interaction.followup.send(f"🎶 Now playing: **{title}**", view=view)
+                NOW_PLAYING[guild_id] = msg
+
+        asyncio.run_coroutine_threadsafe(update_message(), interaction.client.loop)
 
 
 @bot.tree.command(name="play", description="Add a song to the queue.")
@@ -145,8 +169,7 @@ async def play(interaction: discord.Interaction, song: str):
 
     if not voice_client.is_playing() and not voice_client.is_paused():
         play_next(interaction, voice_client)
-        view = MusicControls(voice_client, guild_id)
-        await interaction.followup.send(f"🎶 Now playing: **{title}**", view=view)
+        await interaction.followup.send(f"🎶 Added and now playing: **{title}**")
     else:
         await interaction.followup.send(f"➕ Queued: **{title}**")
 
@@ -178,7 +201,7 @@ class MusicControls(discord.ui.View):
     @discord.ui.button(label="⏭ Skip", style=discord.ButtonStyle.primary)
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.voice_client and self.voice_client.is_playing():
-            self.voice_client.stop()
+            self.voice_client.stop()  # triggers play_next automatically
             await interaction.response.send_message("⏭ Skipped.", ephemeral=True)
         else:
             await interaction.response.send_message("⚠️ Nothing to skip.", ephemeral=True)
@@ -240,6 +263,7 @@ event_messages = {}
 attendance_messages = {}
 
 @bot.command()
+@commands.has_permissions(administrator=True)
 async def event(ctx, *, event_name):
     # Delete the user's message
     try:
@@ -294,6 +318,11 @@ async def event(ctx, *, event_name):
     event_expiry[unique_event_name] = time.time() + 48 * 60 * 60
     event_messages[unique_event_name] = event_message.id
 
+@event.error
+async def event_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("🚫 You don’t have permission to create events!", delete_after=5)
+
 
 
 @bot.event
@@ -325,22 +354,35 @@ async def on_raw_reaction_add(payload):
             attendees[unique_event_name][member.id] = first_name
         except asyncio.TimeoutError:
             await member.send("You did not respond in time. Please react again and reply with your name.")
+
+            channel = bot.get_channel(payload.channel_id)
+            try:
+                event_message = await channel.fetch_message(payload.message_id)
+                await event_message.remove_reaction('✅', member)
+            except Exception as e:
+                print(f"Error while removing reaction: {e}")
         except Exception as e:
             print(f"Error while collecting first name: {e}")
 
     # Handle 📃 reaction (show attendance)
     elif payload.emoji.name == '📃':
-        attending_members = attendees[unique_event_name]
-        if not attending_members:
-            attendance_message = await channel.send(f"No one is attending the event '{unique_event_name}'.")
-        else:
-            names = "\n".join(attending_members.values())  # Get first names from the dictionary
-            attendance_message = await channel.send(f"Attendees for '{unique_event_name}':\n{names}")
+        
+        try:
+            message = await channel.fetch_message(message_id)
+            await message.remove_reaction('📃', member)
+        except Exception as e:
+            print(f"Error while removing reaction: {e}")
 
-        # Track the attendance message
-        if unique_event_name not in attendance_messages:
-            attendance_messages[unique_event_name] = []
-        attendance_messages[unique_event_name].append(attendance_message.id)
+        attending_members = attendees[unique_event_name]
+        try:
+            if not attending_members:
+                await member.send(f"📭 Nobody has joined **{unique_event_name}** yet.")
+            else:
+                names = "\n".join(attending_members.values())  
+                await member.send(f"👥 **Attendees for {unique_event_name}:**\n{names}")
+        except discord.Forbidden:
+            await channel.send(f"{member.mention}, I can't send you a DM. Please check your privacy settings.", delete_after=10)
+            return
 
 @bot.event
 async def on_raw_reaction_remove(payload):
@@ -358,19 +400,7 @@ async def on_raw_reaction_remove(payload):
     if payload.emoji.name == '✅':
         if member.id in attendees[unique_event_name]:
             attendees[unique_event_name].pop(member.id)  # Remove by user ID
-    elif payload.emoji.name == '📃':
-            if unique_event_name in attendance_messages:
-            # Delete all attendance messages for this event
-                for message_id in attendance_messages[unique_event_name]:
-                    try:
-                        message = await channel.fetch_message(message_id)
-                        await message.delete()
-                    except discord.NotFound:
-                        continue  # Skip if the message is not found
-                    except discord.Forbidden:
-                        print(f"Could not delete attendance message in {channel.name}.")
-                # Clear the attendance messages for this event
-                attendance_messages[unique_event_name] = []
+
 
 # Background task to clean up expired events
 async def cleanup_expired_events():
@@ -447,4 +477,3 @@ async def clear(ctx):
 
 
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
-
