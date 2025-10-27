@@ -7,12 +7,15 @@ import time
 from discord.ext import commands
 from dotenv import load_dotenv
 from discord import app_commands
+from collections import deque
+
 
 
 load_dotenv()
 
 token = os.getenv('DISCORD_TOKEN')
 
+SONG_QUEUE = {}
 
 async def search_youtube(query,ydl_options):
     loop = asyncio.get_running_loop()
@@ -41,7 +44,6 @@ GUILD_ID = 1397065582880493618
 
 @bot.event
 async def on_ready():
-    await bot.tree.clear_commands()
     await bot.tree.sync()
 
     print("Global slash commands synchronized!")
@@ -56,17 +58,28 @@ async def on_message(message):
     if message.author == bot.user:
         return
     
-    if "sup" in message.content.lower():
-        await message.channel.send(f"stfu {message.author.name}")
-    await bot.process_commands(message)
 
     if "bhris" in message.content.lower():
         await message.channel.send("I'm toired")
+    
+    await bot.process_commands(message)
     
 
 @bot.command()
 async def ping(ctx):
     await ctx.send('Pong!')
+
+@bot.command()
+async def instagram(ctx):
+    """Sends the team Instagram link."""
+    url = "https://www.instagram.com/beavsknowbjj"
+    embed = discord.Embed(
+        title="📸 Beavs Know BJJ Instagram",
+        url=url,
+        description="Follow us on Instagram!",
+        color=discord.Color.orange()
+    )
+    await ctx.send(embed=embed)
 
 @bot.command()
 async def hello(ctx):
@@ -77,15 +90,54 @@ async def test(ctx, arg):
     await ctx.send(arg)
 
 # Music commands
+NOW_PLAYING = {}
 
-@bot.tree.command(name="play", description="add it to the queue.")
+
+def play_next(interaction, voice_client):
+    guild_id = interaction.guild.id
+    if SONG_QUEUE[guild_id]:
+        title, url = SONG_QUEUE[guild_id].popleft()
+
+        ffmpeg_options = {
+            "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+            "options": "-vn"
+        }
+
+        source = discord.FFmpegOpusAudio(
+            url,
+            **ffmpeg_options,
+            executable="bin\\ffmpeg.exe"
+        )
+
+        def after_playing(error):
+            if error:
+                print(f"Playback error: {error}")
+            play_next(interaction, voice_client)
+
+        voice_client.play(source, after=after_playing)
+
+        # ✅ Update Now Playing message
+        async def update_message():
+            view = MusicControls(voice_client, guild_id)
+            if guild_id in NOW_PLAYING:
+                try:
+                    await NOW_PLAYING[guild_id].edit(content=f"🎶 Now playing: **{title}**", view=view)
+                except Exception:
+                    pass
+            else:
+                msg = await interaction.followup.send(f"🎶 Now playing: **{title}**", view=view)
+                NOW_PLAYING[guild_id] = msg
+
+        asyncio.run_coroutine_threadsafe(update_message(), interaction.client.loop)
+
+
+@bot.tree.command(name="play", description="Add a song to the queue.")
 @app_commands.describe(song="The song to play or add to the queue.")
 async def play(interaction: discord.Interaction, song: str):
-    await interaction.response.defer()
+    await interaction.response.defer(thinking=True)
 
-    # Check voice connection
     if not interaction.user.voice or not interaction.user.voice.channel:
-        await interaction.followup.send("You are not connected to a voice channel.")
+        await interaction.followup.send("❌ You must be in a voice channel.")
         return
 
     voice_channel = interaction.user.voice.channel
@@ -96,12 +148,8 @@ async def play(interaction: discord.Interaction, song: str):
     elif voice_channel != voice_client.channel:
         await voice_client.move_to(voice_channel)
 
-    ydl_options = {
-        "format": "bestaudio/best",
-        "noplaylist": True,
-        "quiet": True,
-    }
-
+    # search YT
+    ydl_options = {"format": "bestaudio/best", "noplaylist": True, "quiet": True}
     query = f"ytsearch1:{song}"
     results = await search_youtube(query, ydl_options)
     tracks = results.get("entries", [])
@@ -110,37 +158,73 @@ async def play(interaction: discord.Interaction, song: str):
         return
 
     first_track = tracks[0]
-    audio_url = first_track["url"]
     title = first_track.get("title", "Untitled")
+    url = first_track["url"]
+
+    guild_id = interaction.guild.id
+    if guild_id not in SONG_QUEUE:
+        SONG_QUEUE[guild_id] = deque()
+
+    SONG_QUEUE[guild_id].append((title, url))
+
+    if not voice_client.is_playing() and not voice_client.is_paused():
+        play_next(interaction, voice_client)
+        await interaction.followup.send(f"🎶 Added and now playing: **{title}**")
+    else:
+        await interaction.followup.send(f"➕ Queued: **{title}**")
 
 
-    # Log the audio URL for debugging
-    print(f"🔊 Playing URL: {audio_url}")
-    ffmpeg_options = {
-        "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-        "options": "-vn",
-    }
 
-    try:
-        source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(
-                audio_url,
-                **ffmpeg_options,   
-                executable="bin\\ffmpeg.exe"
-            )
-        )
-        if not voice_client.is_playing():
-            voice_client.play(source)
-            await interaction.followup.send(f"Now playing: **{title}**")
+
+class MusicControls(discord.ui.View):
+    def __init__(self, voice_client, guild_id):
+        super().__init__(timeout=None)  # persistent until manually removed
+        self.voice_client = voice_client
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="⏸ Pause", style=discord.ButtonStyle.secondary)
+    async def pause(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.voice_client and self.voice_client.is_playing():
+            self.voice_client.pause()
+            await interaction.response.send_message("⏸ Paused.", ephemeral=True)
         else:
-            await interaction.followup.send("Already playing something.")
+            await interaction.response.send_message("⚠️ Nothing is playing.", ephemeral=True)
 
-        # Wait until playback finishes
-        while voice_client.is_playing():
-            await asyncio.sleep(1)
+    @discord.ui.button(label="▶ Resume", style=discord.ButtonStyle.success)
+    async def resume(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.voice_client and self.voice_client.is_paused():
+            self.voice_client.resume()
+            await interaction.response.send_message("▶ Resumed.", ephemeral=True)
+        else:
+            await interaction.response.send_message("⚠️ Nothing is paused.", ephemeral=True)
 
-    except Exception as e:
-        await interaction.followup.send(f"Playback error: {str(e)}")
+    @discord.ui.button(label="⏭ Skip", style=discord.ButtonStyle.primary)
+    async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.voice_client and self.voice_client.is_playing():
+            self.voice_client.stop()  # triggers play_next automatically
+            await interaction.response.send_message("⏭ Skipped.", ephemeral=True)
+        else:
+            await interaction.response.send_message("⚠️ Nothing to skip.", ephemeral=True)
+
+    @discord.ui.button(label="🛑 Stop", style=discord.ButtonStyle.danger)
+    async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.voice_client and self.voice_client.is_connected():
+            SONG_QUEUE[self.guild_id].clear()
+            self.voice_client.stop()
+            await self.voice_client.disconnect()
+            await interaction.response.send_message("🛑 Stopped playback and left channel.", ephemeral=True)
+        else:
+            await interaction.response.send_message("⚠️ Not connected.", ephemeral=True)
+
+    @discord.ui.button(label="📜 Queue", style=discord.ButtonStyle.secondary)
+    async def show_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.guild_id not in SONG_QUEUE or not SONG_QUEUE[self.guild_id]:
+            await interaction.response.send_message("📭 The queue is empty.", ephemeral=True)
+        else:
+            queue_list = [f"{i+1}. {title}" for i, (title, _) in enumerate(SONG_QUEUE[self.guild_id])]
+            queue_text = "\n".join(queue_list)
+            await interaction.response.send_message(f"🎶 **Queue:**\n{queue_text}", ephemeral=True)
+
 
 
 @bot.tree.command(name="leave", description="Disconnect the bot from the voice channel.")
@@ -179,6 +263,7 @@ event_messages = {}
 attendance_messages = {}
 
 @bot.command()
+@commands.has_permissions(administrator=True)
 async def event(ctx, *, event_name):
     # Delete the user's message
     try:
@@ -233,6 +318,11 @@ async def event(ctx, *, event_name):
     event_expiry[unique_event_name] = time.time() + 48 * 60 * 60
     event_messages[unique_event_name] = event_message.id
 
+@event.error
+async def event_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("🚫 You don’t have permission to create events!", delete_after=5)
+
 
 
 @bot.event
@@ -264,22 +354,35 @@ async def on_raw_reaction_add(payload):
             attendees[unique_event_name][member.id] = first_name
         except asyncio.TimeoutError:
             await member.send("You did not respond in time. Please react again and reply with your name.")
+
+            channel = bot.get_channel(payload.channel_id)
+            try:
+                event_message = await channel.fetch_message(payload.message_id)
+                await event_message.remove_reaction('✅', member)
+            except Exception as e:
+                print(f"Error while removing reaction: {e}")
         except Exception as e:
             print(f"Error while collecting first name: {e}")
 
     # Handle 📃 reaction (show attendance)
     elif payload.emoji.name == '📃':
-        attending_members = attendees[unique_event_name]
-        if not attending_members:
-            attendance_message = await channel.send(f"No one is attending the event '{unique_event_name}'.")
-        else:
-            names = "\n".join(attending_members.values())  # Get first names from the dictionary
-            attendance_message = await channel.send(f"Attendees for '{unique_event_name}':\n{names}")
+        
+        try:
+            message = await channel.fetch_message(message_id)
+            await message.remove_reaction('📃', member)
+        except Exception as e:
+            print(f"Error while removing reaction: {e}")
 
-        # Track the attendance message
-        if unique_event_name not in attendance_messages:
-            attendance_messages[unique_event_name] = []
-        attendance_messages[unique_event_name].append(attendance_message.id)
+        attending_members = attendees[unique_event_name]
+        try:
+            if not attending_members:
+                await member.send(f"📭 Nobody has joined **{unique_event_name}** yet.")
+            else:
+                names = "\n".join(attending_members.values())  
+                await member.send(f"👥 **Attendees for {unique_event_name}:**\n{names}")
+        except discord.Forbidden:
+            await channel.send(f"{member.mention}, I can't send you a DM. Please check your privacy settings.", delete_after=10)
+            return
 
 @bot.event
 async def on_raw_reaction_remove(payload):
@@ -297,19 +400,7 @@ async def on_raw_reaction_remove(payload):
     if payload.emoji.name == '✅':
         if member.id in attendees[unique_event_name]:
             attendees[unique_event_name].pop(member.id)  # Remove by user ID
-    elif payload.emoji.name == '📃':
-            if unique_event_name in attendance_messages:
-            # Delete all attendance messages for this event
-                for message_id in attendance_messages[unique_event_name]:
-                    try:
-                        message = await channel.fetch_message(message_id)
-                        await message.delete()
-                    except discord.NotFound:
-                        continue  # Skip if the message is not found
-                    except discord.Forbidden:
-                        print(f"Could not delete attendance message in {channel.name}.")
-                # Clear the attendance messages for this event
-                attendance_messages[unique_event_name] = []
+
 
 # Background task to clean up expired events
 async def cleanup_expired_events():
@@ -382,9 +473,7 @@ async def clear(ctx):
     event_messages.clear()  # Clear the event messages dictionary
     attendance_messages.clear()  # Clear the attendance messages dictionary
 
-    await ctx.send("All events and attendance messages have been cleared.")
     
 
 
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
-
