@@ -16,12 +16,14 @@ load_dotenv()
 token = os.getenv('DISCORD_TOKEN')
 
 SONG_QUEUE = {}
+YTDLP_COOKIES = "www.youtube.com_cookies.txt"
 
 async def search_youtube(query,ydl_options):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: _extract(query,ydl_options))
 
 def _extract(query, ydl_options):
+    ydl_options["cookies"] = YTDLP_COOKIES
     with yt_dlp.YoutubeDL(ydl_options) as ydl:
         return ydl.extract_info(query, download = False)
 
@@ -149,7 +151,7 @@ async def play(interaction: discord.Interaction, song: str):
         await voice_client.move_to(voice_channel)
 
     # search YT
-    ydl_options = {"format": "bestaudio/best", "noplaylist": True, "quiet": True}
+    ydl_options = {"format": "bestaudio/best", "noplaylist": True, "quiet": True, "cookies": YTDLP_COOKIES,}
     query = f"ytsearch1:{song}"
     results = await search_youtube(query, ydl_options)
     tracks = results.get("entries", [])
